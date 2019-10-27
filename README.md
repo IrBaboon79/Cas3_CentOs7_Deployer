@@ -40,4 +40,12 @@ The script will take care of:
 5) maintenance scripts will be installed as systemd timer
 6) several other minor things here and there...
 
+Things to do AFTERWARDS:
+------------------------
+1) Configure your firewall/zones accordingly
+2) Configure cassandra network related items
+3) Start the respective systemd units
+4) Check everything is working as expected
+5) Reboot the box, confirm all remains working as expected.
+
 
