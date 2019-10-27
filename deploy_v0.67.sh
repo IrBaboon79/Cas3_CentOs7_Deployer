@@ -1,0 +1,602 @@
+#!/usr/bin/env bash
+
+VERSION='v0.67'
+
+##########################
+# Configuration section! #
+##########################
+JRE_ARCHIVE="SW/jre-8u221-linux-x64.tar.gz"
+CAS3_ARCHIVE="SW/apache-cassandra-3.11.4-bin.tar.gz"
+CASS_NAME="apache-cassandra-3.11.4" # this should be also updated!
+
+CAS_REP_SCRIPT="SW/casrep_v0.2a.sh"
+CAS_REP_LOGMAINT_SCRIPT="SW/SimpleLogMaintainer_v0.1a.sh"
+
+TRXCFG_ClusterName='Traxis'
+JRE_BASE=/opt/java
+JRE_LOCATION=/opt/java/$JRE_VERSION
+JRE_SYMLINKNAME=RTi_java
+
+
+function CheckFileIsValid() {
+if [ ! -f $1 ]; then
+   echo "Provided file does not exist: $1"
+   return 1
+   else return 0
+fi
+
+echo -n " ==> Validating $1 archive file... "
+gunzip -t $1 2>> /dev/null
+if [ $? -ne 0  ]; then
+   echo "=> Provided file is not a valid .tar.gz archive: $1 !!"
+   echo
+   return 1
+   else 
+    echo "OK!"
+    return 0
+fi
+}
+
+
+clear
+echo "Cassandra 3 / CentOS 7 $VERSION Deployer by RTi/2019"
+echo '================================================='
+echo "Running from: $PWD"
+echo "Configured JRE Archive : $JRE_ARCHIVE"
+echo "Configured Cassandra Archive: $CAS3_ARCHIVE"
+echo "Configured Maintenance / Repair Script: $CAS_REP_SCRIPT"
+echo "Configured Maintenance / Repair Script Log Maintainer: $CAS_REP_LOGMAINT_SCRIPT"
+echo ""
+
+echo "Do the archives & locations above contain the JRE/Cassandra & scipts you wish to deploy now ? (Yes/No)"
+select GO in "Yes" "No"; do
+       case $GO in
+            No ) echo " Aborting script!"
+                 exit 1
+                 break
+               ;;
+            Yes ) echo -n '==> Allrighty then...'
+                 
+                 break
+              ;;
+       esac
+done
+
+echo 'Lets do a few sanity checks first...'
+
+# Check if the script is running with root permissions
+if [ `id -u` -ne 0 ]; then
+   echo "The script must be run as root! (you can use sudo)"
+   exit 1
+fi
+
+if [ ! -f $CAS_REP_SCRIPT ]; then
+   echo "==> Something is off with $CAS_REP_SCRIPT, exiting!"
+   exit 1
+   echo
+   else echo " ==> $CAS_REP_SCRIPT exists - Continuing..."
+fi
+
+if [ ! -f $CAS_REP_LOGMAINT_SCRIPT ]; then
+   echo "==> Something is off with $CAS_REP_LOGMAINT_SCRIPT, exiting!"
+   exit 1
+   echo
+   else echo " ==> $CAS_REP_LOGMAINT_SCRIPT exists - Continuing..."
+fi
+
+CheckFileIsValid $JRE_ARCHIVE
+
+if [ $? -ne 0  ]; then
+   echo "==> Something is off with $JRE_ARCHIVE, exiting!"
+   exit 1
+   echo
+   else echo " ==> $JRE_ARCHIVE checks out - Continuing..."
+fi
+
+#   file containing JRE?
+#   Also obtain JRE version using the occassion
+JRE_VERSION=`tar -tf $JRE_ARCHIVE | egrep '^[^/]+/$' | head -c -2` 2>> /dev/null
+if [[ ! $JRE_VERSION =~ [jre|jdk]* ]]; then
+   echo "FAILED"
+   echo
+   echo "The provided archive does not contain JRE/JDK: $JRE_ARCHIVE"
+   echo
+   exit 1
+fi
+
+CheckFileIsValid $CAS3_ARCHIVE
+
+if [ $? -ne 0  ]; then
+   echo "==> Something is off with $CAS3_ARCHIVE, exiting!"
+   exit 1
+   echo
+   else echo " ==> $CAS3_ARCHIVE checks out - Continuing..."
+fi
+
+echo '==========================================='
+echo "This script will perform the following actions:"
+echo " => Deploy $JRE_ARCHIVE" 
+echo "    - Unpack archive in /opt/java ..."
+echo "    - Create a symlink /opt/$JRE_SYMLINKNAME ..."
+echo "    - Create and update cassandra users & groups, update exports and profile accordingly ..."
+echo " => Deploy $CAS3_ARCHIVE ..."
+echo "    - Unpack archive in /cassandra" 
+echo "    - Disable swap partitions"
+echo "    - Update configs as needed"
+echo " => Deploy system.d units"
+echo "    - Create / Register cassandra.service for the main service ..."
+echo "    - Create / Register cassandraMaintenanceTask.timer & service ..."
+echo ""
+echo "Probably a few more things :o)! ..."
+echo ""
+echo '==========================================='
+
+echo "Do you want to continue?"
+select bailScript in "Yes" "No"; do
+       case $bailScript in
+            No ) echo " --- Script aborted !"
+                 exit 1
+                 break
+               ;;
+            Yes ) clear
+                  echo "Cassandra 3 / CentOS 7 $VERSION Deployer by RTI"
+                  echo '==========================================='
+                  echo "Entering Deployment Phase..."
+                 break
+              ;;
+       esac
+done
+
+# All checks are done at this point
+
+# Begin Java installation
+
+if [ -d $JRE_BASE ]; then 
+    echo " ==> Directory $JRE_BASE exists...skipping creation!"
+ else
+    echo " ==> Directory $JRE_BASE does not exist - creating it!"
+    mkdir -p $JRE_BASE
+fi
+
+
+# Extract the archive
+echo -n " ==> Extracting $JRE_ARCHIVE archive... "
+tar -xf $JRE_ARCHIVE -C $JRE_BASE
+echo "OK!"
+
+#setup symlink
+echo -n " ==> Setting up symlink in $JRE_BASE..."
+ln -sfn /opt/java/$JRE_VERSION $JRE_BASE/$JRE_SYMLINKNAME
+echo "OK!"
+echo -n " ==> Updating Alternatives..."
+alternatives --install /usr/bin/java java /opt/java/RTi_java/bin/java 100 > /dev/null
+echo "OK!"
+
+# Update /etc/profile
+rm -f /etc/profile.d/javaSC.sh > /dev/null
+echo -n " ==> Updating /etc/profile.d/ ... "
+cat >> /etc/profile.d/javaSC.sh <<EOF
+JAVA_HOME=/opt/java/replace_me
+PATH=$PATH:/opt/java/replace_me/bin
+export JAVA_HOME
+export PATH
+EOF
+sed -i "s|replace_me|$JRE_SYMLINKNAME|" /etc/profile.d/javaSC.sh
+echo "OK!"
+
+#reload the profile
+echo -n " ==> Reloading Profile..."
+. /etc/profile
+
+echo " ==> JAVA installed in: $JAVA_HOME"
+echo " ==> Let's see if Java is alive and all is well..."
+
+if type -p java > /dev/null; then
+    echo " ---- Found java executable in PATH ..."
+    _java=java
+elif [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]];  then
+    echo " ---- Found java executable in JAVA_HOME"
+    _java="$JAVA_HOME/bin/java"
+else
+    echo " ---- Java not found - did the profile reload?"
+fi
+
+if [[ "$_java" ]]; then
+    version=$("$_java" -version 2>&1 | awk -F '"' '/version/ {print $2}')
+    echo " --- Java VM reports version "$version""
+    if [[ "$version" > "1.8" ]]; then
+        echo " ---- version is equal or higher than 1.8, all good!"
+    else         
+        echo " ----  version is lower than 1.8; symlink broken / Install failed?"
+    fi
+fi
+
+# Basic checks are done at this point and java is good to go...
+
+#extract archive to root
+echo -n " ==> Extracting archive file $CAS3_ARCHIVE and moving to /cassandra ... "
+tar -xzf $CAS3_ARCHIVE -C / && mv /$CASS_NAME /cassandra
+echo "OK!"
+
+
+#create users/groups
+echo " ==> Creating groups/users..."
+cas_user_exists=$(id -u cassandra > /dev/null 2>&1; echo $?)
+cas_group_exists=$(id -g cassandra > /dev/null 2>&1; echo $?)
+
+if [ $cas_group_exists -eq 0 ]; then
+    echo " ---- Group 'cassandra' exists - not recreating!"
+else
+    echo -n " ---- Creating Group cassandra..."
+    groupadd cassandra
+    echo "OK!"
+fi
+
+if [ $cas_user_exists -eq 0 ]; then
+    echo " ---- User 'cassandra' exists - not recreating!"
+else
+    echo -n " ---- Creating User cassandra..."
+    useradd cassandra -g cassandra -M -s /usr/sbin/nologin
+    echo "OK!"
+fi
+echo -n " ==> Setting up permissions for cassandra group/user ..."
+chown -R cassandra:cassandra /cassandra && chmod 775 /cassandra
+echo "OK!"
+
+#create /etc/profile.d/cassandraSC.sh
+echo -n " ==> Setting up profile.d..."
+rm -f /etc/profile.d/cassandraSC.sh > /dev/null
+cat >> /etc/profile.d/cassandraSC.sh <<EOF
+export LOCAL_JMX=NO
+export CASSANDRA_HOME=/cassandra
+export PATH=${CASSANDRA_HOME}/bin:${PATH}
+EOF
+echo "OK!"
+
+#reload the profile
+echo -n " ==> Reloading Profile..."
+. /etc/profile
+
+echo ""
+echo " --- Cassandra Home located at: $CASSANDRA_HOME"
+
+#create dir for cassandra PID in opt
+mkdir -p /opt/cassandra/ > /dev/null && chown -R cassandra:cassandra /opt/cassandra/ > /dev/null && chmod 770 /opt/cassandra/ > /dev/null
+
+#Define an array with SysCtl settings to change...
+echo ' ==> Applying sysctl settings (also updating /etc/sysctl.conf)...'
+SysCtlSettings_Array=('vm.swappiness = 1' 'vm.max_map_count=1048575' 'net.ipv4.tcp_keepalive_time=60' 'net.ipv4.tcp_keepalive_probes=3' 'net.ipv4.tcp_keepalive_intvl=10' 'net.core.rmem_max=16777216' 'net.core.wmem_max=16777216' 'net.core.rmem_default=16777216' 'net.core.wmem_default=16777216' 'net.core.optmem_max=40960' 'net.ipv4.tcp_rmem=4096 87380 16777216' 'net.ipv4.tcp_wmem=4096 65536 16777216')
+
+#now loop through the array...
+for (( i=0; i<=$(( ${#SysCtlSettings_Array[@]} -1 )); i++ ))
+do
+ echo -n " ---- setting: ${SysCtlSettings_Array[$i]} ... "
+
+  sysctl "${SysCtlSettings_Array[$i]}" > /dev/null
+  sed -i -e "/`echo "${SysCtlSettings_Array[$i]}" | cut -d '=' -f 1`/d" /etc/sysctl.conf # first find and snip off an existing value.
+  echo "${SysCtlSettings_Array[$i]}" >> /etc/sysctl.conf 
+
+  if [ $? -eq 0 ]; then
+    echo "OK!"
+   else
+    echo "Failed to apply setting!"  
+  fi
+done
+
+echo -n " ==> Making sysctl settings permanent..."
+sysctl -p -q
+echo "OK!"
+
+
+#create /etc/system.d/system/cassandra.service
+echo -n " ==> Creating system.d unit file(s) for Cassandra ... "
+rm -f /etc/systemd/system/cassandra.service > /dev/null && rm -f /etc/systemd/system/multi-user.target.wants/cassandra.service > /dev/null
+
+cat >> /etc/systemd/system/cassandra.service <<EOF
+[Unit]
+Description=Cassandra Service
+After=network.target
+
+[Service]
+Type=forking
+User=cassandra
+Group=cassandra
+
+PIDFile=/opt/cassandra/PID
+Environment=JAVA_HOME=/opt/java/replace_me
+#add this for safety
+Environment=LOCAL_JMX=no
+
+#swapoff shouldnt be needed since we'll change fstab but just in case systemd decides to remount something...
+ExecStartPre=-/sbin/swapoff -a
+ExecStart=/cassandra/bin/cassandra  -p /opt/cassandra/PID
+
+WorkingDirectory=/cassandra
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=100000
+LimitMEMLOCK=infinity
+LimitNPROC=32768
+LimitAS=infinity
+Restart=always
+RestartSec=60
+TimeoutStopSec=60
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sed -i "s|replace_me|$JRE_SYMLINKNAME|" /etc/systemd/system/cassandra.service
+echo "OK!"
+
+#create /etc/system.d/system/cassandra repair task timer & service units
+echo -n " ==> Hard-Removing (if exists): system.d Timer & Service unit file(s) for Cassandra Maintenance Repair Task... "
+rm -f /etc/systemd/system/CassandraMaintenanceRepairTask.*> /dev/null && rm -f /etc/systemd/system/timers.target.wants/CassandraMaintenanceRepairTask.* > /dev/null
+echo -n " ==> Creating system.d Timer & Service unit file(s) for Cassandra Maintenance Repair Task... "
+
+cat >> /etc/systemd/system/CassandraMaintenanceRepairTask.timer <<EOF
+[Unit]
+Description=Run Cassandra Maintenance Repair Script
+#allow manual start/stop
+RefuseManualStart=No
+RefuseManualStop=No
+ 
+[Timer]
+# daily @ 00:30
+OnCalendar=*-*-* 00:30:00
+# Ensure it runs even if system was down
+Persistent=true
+Unit=CassandraMaintenanceRepairTask.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+cat >> /etc/systemd/system/CassandraMaintenanceRepairTask.service <<EOF
+[Unit] 
+Description=Cassandra 3 Maintenance / Repair Task
+
+[Service] 
+Type=simple
+User=root
+Environment=TERM=xterm
+Environment=JAVA_HOME=/opt/java/replace_me
+ExecStartPre=ReplaceMe
+ExecStart=ReplaceMe
+
+StandardOutput=journal
+StandardError=journal
+
+[Install] 
+WantedBy=multi-user.target
+EOF
+
+#now patch the correct symlinkname in the unit
+sed -i "s|replace_me|$JRE_SYMLINKNAME|" /etc/systemd/system/CassandraMaintenanceRepairTask.service
+echo "OK!"
+
+echo " ==> Registering Cassandra.Service into systemd, Setting to start on reboot & Reloading systemd ... "
+systemctl enable cassandra.service && systemctl daemon-reload
+
+echo " ==> Disabling swap, also removing all swappy stuff from /etc/fstab (find backup in /etc/fstab.bak) ..."
+# swapoff -a to disable ALL swap
+swapoff -a > /dev/null
+# sed to comment the swap partition in /etc/fstab, so that it does't come back after a reboot
+sed -i.bak -r 's|(.+ swap .+)|#\1|' /etc/fstab
+
+#attempt to install jemalloc-3.6.0-1.el7.x86_64
+echo "Attempting to install jemalloc-3.6.0-1.el7.x86_64 ..."
+yum install SW/jemalloc-3.6.0-1.el7.x86_64.rpm -y -q 2> /dev/null
+echo "Resynching YUM/RPM databases - This may take a few moments to complete..."
+yum history sync > /dev/null
+
+#from this point we will need to modify some config/scripts inside the cassandra folder.
+echo -n " ==> Copying mx4j-tools.jar into /cassandra/lib ... "
+cp SW/mx4j-tools.jar /cassandra/lib > /dev/null
+echo "OK!"
+
+echo -n " ==> Backing up several default Cassandra configuration files before patching them..."
+cp /cassandra/bin/cassandra /cassandra/bin/cassandra.original > /dev/null
+cp /cassandra/conf/cassandra.yaml /cassandra/conf/cassandra.yaml.original > /dev/null
+cp /cassandra/conf/cassandra-env.sh /cassandra/conf/cassandra-env.sh.original > /dev/null
+echo "OK!"
+
+echo ""
+echo " ==> Patching cassandra configuration files..."
+echo " ----------------------------------------------"
+#update cassandra.yaml; change cluster name
+echo -n " ==> Updating Cluster Name..."
+sed -i "s|Test Cluster|$TRXCFG_ClusterName|" /cassandra/conf/cassandra.yaml 
+echo 'OK!'
+
+#disable experimental feature 'enable_materialized_views'
+echo -n " ==> Disabling experimental feature: Materialized Views..."
+sed -i 's|enable_materialized_views: true|enable_materialized_views: false|' /cassandra/conf/cassandra.yaml
+echo "OK!"
+
+# setup the JMX Port-> change default from 7199 to 8090
+echo -n " ==> Changing default JMX port to 8090..."
+sed -i 's|JMX_PORT="7199"|JMX_PORT="8090"|' /cassandra/conf/cassandra-env.sh
+echo "OK!"
+
+# enable MX4J (we need this for Management Studio apparently...)
+echo -n " ==> Enabling MX4J on 0.0.0.0:8091..."
+#first uncomment the two lines...
+sed -i 's|#MX4J_|MX4J_|' /cassandra/conf/cassandra-env.sh
+#now set the right port & listen address...
+sed -i 's|MX4J_ADDRESS="-Dmx4jaddress=127.0.0.1"|MX4J_ADDRESS="-Dmx4jaddress=0.0.0.0"|' /cassandra/conf/cassandra-env.sh
+sed -i 's|MX4J_PORT="-Dmx4jport=8081"|MX4J_PORT="-Dmx4jport=8091"|' /cassandra/conf/cassandra-env.sh
+echo "OK!"
+
+#disable cassandra authentication...
+echo -n ' ==> Disabling authentication...'
+sed -i 's|jmxremote.authenticate=true|jmxremote.authenticate=false|' /cassandra/conf/cassandra-env.sh
+sed -i 's|JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.password.file=/etc/cassandra/jmxremote.password"|#JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.password.file=/etc/cassandra/jmxremote.password"|' /cassandra/conf/cassandra-env.sh
+echo 'OK!'
+
+echo " ===================================================="
+echo " Automated phase done! Now to the Interactive phase..." 
+echo " ===================================================="
+echo ""
+echo "Define the BASE mountpoint where cassandra data, commitlogs and logs will be written to..."
+echo "*** HINT: Type the path, DO NOT end in a '/' ***"
+read -p '(suggested: /CassandraStorage): ' CasMount
+echo ""
+echo ""
+echo " Overview of Storage Structure:"
+echo " ============================="
+echo "  - Cassandra Data will be stored in $CasMount/Data"
+echo "  - Cassandra CommitLogs will be stored in $CasMount/CommitLogs"
+echo "  - Cassandra Hints will be stored in $CasMount/Hints"
+echo "  - Cassandra Saved_Caches will be stored in $CasMount/Saved_Caches"
+echo ""
+echo "  - System & Debug Logfiles will be written to: $CasMount/logs"
+echo "  - Maintenance Script will be copied to: $CasMount/Maintenance/scripts"
+echo "  - Maintenance Script will be scheduled DAILY into system.d (note: activate it manually!)"
+echo ""
+
+echo "Do you wish to apply the above configuration & Create the folders on the indicated location?"
+select commitstorage in "Yes" "No"; do
+    case $commitstorage in
+        Yes ) 
+		      echo " ==> Creating storage directories under $CasMount..."
+			  
+               CassandraRelatedFolders_Array=("/Data" "/CommitLog" "/Saved_Caches" "/Hints" "/logs" "/Maintenance/script" "/MaintenanceLog")
+
+				for (( i=0; i<=$(( ${#CassandraRelatedFolders_Array[@]} -1 )); i++ ))
+				do
+				 echo -n " ---- Creating Folder: $CasMount${CassandraRelatedFolders_Array[$i]} ... "
+
+				  mkdir -p $CasMount"${CassandraRelatedFolders_Array[$i]}" > /dev/null
+				  if [ $? -eq 0 ]; then
+					echo "OK!"
+				   else
+					echo "Failed to apply setting!"  
+				  fi
+				done
+
+			   chown -R cassandra:cassandra $CasMount > /dev/null
+              
+			  echo -n " ==> Patching /cassandra/conf/cassandra.yaml - Creating & Setting storage directories..."			  
+			   # multiple patches into same file..
+               sed -i -e "s|# data_file_directories:|data_file_directories:|" -e "s|#     - /var/lib/cassandra/data|- $CasMount/Data|" -e "s|# commitlog_directory: /var/lib/cassandra/commitlog|commitlog_directory: $CasMount/CommitLog|" -e "s|# saved_caches_directory: /var/lib/cassandra/saved_caches|saved_caches_directory: $CasMount/Saved_Caches|" -e "s|# hints_directory: /var/lib/cassandra/hints|hints_directory: $CasMount/Hints|"  /cassandra/conf/cassandra.yaml
+			  echo "OK!"
+
+	          #now modify the loglocation 
+	          sed -i "s|logdir=\$CASSANDRA_HOME/logs|logdir=$CasMount/logs|" /cassandra/bin/cassandra
+
+              #modify the gc log location
+              sed -i "s|JVM_OPTS=\"\$JVM_OPTS -Xloggc:\${CASSANDRA_HOME}/logs/gc.log\"|JVM_OPTS=\"\$JVM_OPTS -Xloggc:$CasMount/logs/gc.log\"|" /cassandra/conf/cassandra-env.sh
+
+              echo -n " ==> Deploying Maintenance Script to $CasMount/Maintenance/script/ ..."			   
+
+              cp $CAS_REP_SCRIPT $CasMount/Maintenance/script/casrep.sh && chmod a+x $CasMount/Maintenance/script/casrep.sh
+              cp $CAS_REP_LOGMAINT_SCRIPT $CasMount/Maintenance/script/casreplogmaintainer.sh && chmod a+x $CasMount/Maintenance/script/casreplogmaintainer.sh
+			  
+              sed -i "s|LOGDIR=\"/CassandraStorage/MaintenanceLog\"|LOGDIR=\"$CasMount/MaintenanceLog\"|" $CasMount/Maintenance/script/casrep.sh
+              sed -i "s|LOGFILE=log_file_to_maintain|LOGFILE=\"$CasMount/MaintenanceLog/repairlog.log\"|" $CasMount/Maintenance/script/casreplogmaintainer.sh
+              sed -i "s|ExecStart=ReplaceMe|ExecStart=$CasMount/Maintenance/script/casrep.sh|" /etc/systemd/system/CassandraMaintenanceRepairTask.service
+              sed -i "s|ExecStartPre=ReplaceMe|ExecStartPre=$CasMount/Maintenance/script/casreplogmaintainer.sh|" /etc/systemd/system/CassandraMaintenanceRepairTask.service
+
+               
+              echo " ==> Registering CassandraMaintenanceRepairTask in system.d"
+              systemctl enable CassandraMaintenanceRepairTask.timer
+              systemctl daemon-reload
+
+              break
+          ;;
+        No ) echo " ==> Skipping adjustment of paths... - adjust it manually!"
+             break
+         ;;
+    esac
+done
+
+
+echo "Enable RPC Server?"
+select erpc in "Yes" "No"; do
+       case $erpc in
+            Yes ) echo " ==> Patching /cassandra/conf/cassandra.yaml - Enabling RPC Server..."
+                  sed -i "s|start_rpc: false|start_rpc: true|" /cassandra/conf/cassandra.yaml
+                  break
+               ;;
+            No ) echo " ==> Patching /cassandra/conf/cassandra.yaml - Disabling RPC Server..."
+                 sed -i "s|start_rpc: true|start_rpc: false|" /cassandra/conf/cassandra.yaml
+                 break
+              ;;
+       esac
+done
+
+echo "Which Type of Disk is this node using?"
+select dt in "Spinning" "SSD"; do
+       case $dt in
+            Spinning ) echo " ==> Patching /cassandra/conf/cassandra.yaml - Changing Disk Optimization Strategy to: $dt..."
+                  sed -i "s|# disk_optimization_strategy: ssd|disk_optimization_strategy: spinning|" /cassandra/conf/cassandra.yaml
+                  break
+               ;;
+            SSD ) echo " ==> Patching /cassandra/conf/cassandra.yaml - Changing Disk Optimization Strategy to: $dt..."
+                 sed -i "s|# disk_optimization_strategy: ssd|disk_optimization_strategy: ssd|" /cassandra/conf/cassandra.yaml
+                 break
+              ;;
+       esac
+done
+
+echo "Change endpoint snitch to GossipingPropertyFileSnitch (This should be the go-to choice for ANY production system !) ?"
+select snitch in "Yes" "No"; do
+       case $snitch in
+            No ) echo " ==> NOT Patching /cassandra/conf/cassandra.yaml - leaving default snitch"
+                 break
+               ;;
+            Yes ) echo " ==> Patching /cassandra/conf/cassandra.yaml - Changing endpoint to GossipingPropertyFileSnitch..."
+                 sed -i "s|endpoint_snitch: SimpleSnitch|endpoint_snitch: GossipingPropertyFileSnitch|" /cassandra/conf/cassandra.yaml
+                 break
+              ;;
+       esac
+done
+
+
+echo ""
+echo ""
+echo " *** Please perform the following steps manually ***"
+echo " ***************************************************"
+echo ""
+echo " --- 1) Check/Set IP addresses for Seeds, listening address, broadcast address \& rpc (=thrift) address..."
+echo ""
+echo "        Current values in /cassandra/conf/cassandra.yaml ::"
+echo "        ---------------------------------------------------"
+grep listen_address: /cassandra/conf/cassandra.yaml
+grep rpc_address: /cassandra/conf/cassandra.yaml
+grep broadcast_address: /cassandra/conf/cassandra.yaml
+grep seeds: /cassandra/conf/cassandra.yaml
+
+echo ""
+echo ""
+echo " --- 2) Configure /cassandra/conf/cassandra-env.sh !!! ***"
+echo "        JVM_OPTS=\"$JVM_OPTS -Djava.rmi.server.hostname=<external node IP>\" "
+echo ""
+echo ""
+echo " --- 3) Make sure NTP is setup properly - for Centos this is done via chronyd (/etc/chronyd.conf) !!"
+echo " --- 4) Configure your firewall properly: example below, make sure to set your zones properly!!"
+echo "        -> firewall-cmd --zone=public --add-port=7000/tcp --add-port=8090/tcp --add-port=8091/tcp --add-port=9042/tcp --add-port=9160/tcp --permanent"
+echo "        -> firewall-cmd --reload"
+echo "        -> service firewalld restart"
+echo "         # confirm done, check the zones for the added ports"
+echo "        -> firewall-cmd --info-zone=xxxx"
+echo ""
+echo ""
+echo " --- 5) Check the cassandra Maintenance Task:"
+echo "         -> systemctl start CassandraMaintenanceRepairTask.timer"
+echo "         # confirm it's scheduled by executing:"
+echo "         -> systemctl list-timers -all"
+echo "         # confirm it's working by manually executing & checking the journal...: "
+echo "         -> systemctl start CassandraMaintenanceRepairTask"
+echo "         -> systemctl status CassandraMaintenanceRepairTask"
+echo "         # confirm it's not throwing unexpected errors in journald !!"
+echo "         -> journalctl -ex"
+echo ""
+echo ""
+echo " --- 6) After all seems working - rebooting the box is highly recommended; it should all start by itself...!!"
+echo ""
+echo ""
+echo " ***************************************************"
+echo " Note: from now on start/stop cassandra as follows: systemctl <start/stop/restart> cassandra"
