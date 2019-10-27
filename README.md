@@ -32,6 +32,7 @@ Operation
 The script will take care of:
 -----------------------------
 1) Extracting JRE and set it up accordingly.
+
    Note: update JRE by simply extracting another version and updating the symlink
 2) Extracting cassandra to /cassandra
 3) systemctl parameters, systemd units, etc.. will all be set permantently/created as needed
